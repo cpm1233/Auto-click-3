@@ -1,0 +1,2115 @@
+name: Build APK Confiável
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # A chave de assinatura fica em cache: assim todas as versões usam a mesma
+      # assinatura e o app pode ser atualizado sem desinstalar.
+      - name: Restaurar chave de assinatura
+        uses: actions/cache@v4
+        with:
+          path: |
+            app/release-key.jks
+            app/release-key.pass
+          key: autoclicker-keystore-v1
+
+      - name: Criar projeto Android Seguro e Confiável
+        run: |
+          mkdir -p app/src/main/java/com/meu/autoclicker app/src/main/res/xml app/src/main/res/values
+
+          # Senha aleatória (nada de senha fixa no código) + keystore gerado só uma vez
+          if [ ! -f app/release-key.jks ] || [ ! -f app/release-key.pass ]; then
+            rm -f app/release-key.jks
+            openssl rand -hex 16 > app/release-key.pass
+            keytool -genkey -keystore app/release-key.jks -keyalg RSA -keysize 2048 -validity 10000 \
+              -alias autoclicker_alias -storepass "$(cat app/release-key.pass)" -keypass "$(cat app/release-key.pass)" \
+              -dname "CN=AutoClicker Pro, OU=Development, O=Trusted, L=Brasil, ST=SP, C=BR"
+          fi
+          echo "KS_PASS=$(cat app/release-key.pass)" >> "$GITHUB_ENV"
+
+          cat > settings.gradle.kts <<'KT_EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "AutoClickerPro"
+          include(":app")
+          KT_EOF
+
+          cat > build.gradle.kts <<'KT_EOF'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          KT_EOF
+
+          cat > gradle.properties <<'KT_EOF'
+          org.gradle.jvmargs=-Xmx3g -Dfile.encoding=UTF-8
+          android.useAndroidX=false
+          android.nonTransitiveRClass=true
+          KT_EOF
+
+          cat > app/proguard-rules.pro <<'KT_EOF'
+          -keep class com.meu.autoclicker.** { *; }
+          -dontwarn com.meu.autoclicker.**
+          KT_EOF
+
+          cat > app/build.gradle.kts <<'KT_EOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+
+          android {
+              namespace = "com.meu.autoclicker"
+              compileSdk = 34
+
+              signingConfigs {
+                  create("release") {
+                      storeFile = file("release-key.jks")
+                      storePassword = System.getenv("KS_PASS")
+                      keyAlias = "autoclicker_alias"
+                      keyPassword = System.getenv("KS_PASS")
+                  }
+              }
+
+              defaultConfig {
+                  applicationId = "com.meu.autoclicker"
+                  minSdk = 24
+                  targetSdk = 34
+                  versionCode = 4
+                  versionName = "2.2"
+              }
+
+              buildTypes {
+                  release {
+                      isMinifyEnabled = true
+                      proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+                      signingConfig = signingConfigs.getByName("release")
+                  }
+              }
+
+              lint {
+                  abortOnError = false
+                  checkReleaseBuilds = false
+              }
+
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions {
+                  jvmTarget = "17"
+              }
+          }
+          KT_EOF
+
+          cat > app/src/main/AndroidManifest.xml <<'KT_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-permission android:name="android.permission.VIBRATE" />
+
+              <application
+                  android:allowBackup="false"
+                  android:icon="@android:drawable/ic_menu_compass"
+                  android:label="Auto Clicker Pro"
+                  android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+
+                  <activity
+                      android:name=".SettingsActivity"
+                      android:exported="false"
+                      android:theme="@android:style/Theme.DeviceDefault.NoActionBar" />
+
+                  <activity
+                      android:name=".ClickConfigActivity"
+                      android:exported="false"
+                      android:excludeFromRecents="true"
+                      android:taskAffinity=""
+                      android:theme="@android:style/Theme.DeviceDefault.Dialog" />
+
+                  <service
+                      android:name=".ClickService"
+                      android:exported="true"
+                      android:label="Auto Clicker Pro"
+                      android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+                      <intent-filter>
+                          <action android:name="android.accessibilityservice.AccessibilityService" />
+                      </intent-filter>
+                      <meta-data
+                          android:name="android.accessibilityservice"
+                          android:resource="@xml/accessibility_config" />
+                  </service>
+              </application>
+          </manifest>
+          KT_EOF
+
+          cat > app/src/main/res/xml/accessibility_config.xml <<'KT_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+              android:accessibilityEventTypes="typeWindowStateChanged"
+              android:accessibilityFeedbackType="feedbackGeneric"
+              android:accessibilityFlags="flagDefault"
+              android:canPerformGestures="true"
+              android:canRetrieveWindowContent="false"
+              android:description="@string/service_desc"
+              android:notificationTimeout="100" />
+          KT_EOF
+
+          cat > app/src/main/res/values/strings.xml <<'KT_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <string name="service_desc">Executa toques e deslizes automáticos. Não lê o conteúdo da tela, não acessa a internet e possui parada de emergência, limite de tempo e bloqueio de apps sensíveis.</string>
+          </resources>
+          KT_EOF
+
+          cat > app/src/main/java/com/meu/autoclicker/Prefs.kt <<'KT_EOF'
+          package com.meu.autoclicker
+
+          import android.content.Context
+
+          object Prefs {
+
+              class Field(
+                  val key: String,
+                  val label: String,
+                  val def: Long,
+                  val desc: String,
+                  val unit: String,
+                  val min: Long,
+                  val max: Long
+              )
+
+              val fields = listOf(
+                  Field("interval", "Intervalo entre toques", 500L, "Tempo de espera entre um toque e o próximo.", "ms", 10L, 600000L),
+                  Field("random", "Variação aleatória do intervalo", 0L, "Soma ou subtrai um tempo aleatório do intervalo.", "± ms", 0L, 60000L),
+                  Field("tapDur", "Duração do toque", 50L, "Quanto tempo o toque fica pressionado na tela.", "ms", 1L, 10000L),
+                  Field("swipeDur", "Duração do deslize", 400L, "Tempo que o deslize leva do ponto A até o ponto B.", "ms", 1L, 10000L),
+                  Field("startDelay", "Atraso antes de começar", 1000L, "Espera antes do primeiro toque, para você se preparar.", "ms", 0L, 60000L),
+                  Field("jitter", "Variação de posição", 0L, "Muda o ponto do toque alguns pixels, para parecer mais natural.", "px", 0L, 200L),
+                  Field("repeats", "Repetições do ciclo", 0L, "Quantas vezes repetir todos os pontos. Use 0 para repetir sem parar.", "vezes", 0L, 1000000L),
+                  Field("maxMinutes", "Tempo máximo de execução", 30L, "Para sozinho depois desse tempo. Use 0 para não limitar.", "min", 0L, 1440L),
+                  Field("safeMode", "Modo seguro", 1L, "", "", 0L, 1L),
+                  Field("vibrate", "Vibração", 1L, "", "", 0L, 1L),
+                  Field("theme", "Tema", 0L, "", "", 0L, 1L),
+                  Field("panelScale", "Tamanho do painel", 100L, "", "%", 60L, 150L),
+                  Field("panelAlpha", "Transparência do painel", 95L, "", "%", 30L, 100L),
+                  Field("panelColor", "Cor do painel", 0L, "", "", 0L, 4L)
+              )
+
+              private val noProfile = setOf("theme")
+
+              fun find(key: String): Field? = fields.firstOrNull { it.key == key }
+
+              private fun sp(c: Context) = c.getSharedPreferences("cfg", Context.MODE_PRIVATE)
+
+              fun get(c: Context, key: String): Long = sp(c).getLong(key, find(key)?.def ?: 0L)
+
+              fun set(c: Context, key: String, v: Long) {
+                  val f = find(key)
+                  val value = if (f != null) v.coerceIn(f.min, f.max) else v
+                  sp(c).edit().putLong(key, value).apply()
+              }
+
+              fun getRaw(c: Context, key: String, def: Long): Long = sp(c).getLong(key, def)
+
+              fun setRaw(c: Context, key: String, v: Long) {
+                  sp(c).edit().putLong(key, v).apply()
+              }
+
+              // ---- Perfis (3 espaços para salvar configurações)
+              private fun prof(c: Context, slot: Int) = c.getSharedPreferences("profile" + slot, Context.MODE_PRIVATE)
+
+              fun hasProfile(c: Context, slot: Int): Boolean = prof(c, slot).contains("_saved")
+
+              fun profileTime(c: Context, slot: Int): Long = prof(c, slot).getLong("_saved", 0L)
+
+              fun saveProfile(c: Context, slot: Int) {
+                  val e = prof(c, slot).edit()
+                  for (f in fields) {
+                      if (f.key in noProfile) continue
+                      e.putLong(f.key, get(c, f.key))
+                  }
+                  e.putLong("_saved", System.currentTimeMillis())
+                  e.apply()
+              }
+
+              fun loadProfile(c: Context, slot: Int) {
+                  val s = prof(c, slot)
+                  for (f in fields) {
+                      if (f.key in noProfile) continue
+                      set(c, f.key, s.getLong(f.key, f.def))
+                  }
+              }
+
+              fun resetAll(c: Context) {
+                  for (f in fields) {
+                      if (f.key in noProfile) continue
+                      set(c, f.key, f.def)
+                  }
+                  setRaw(c, "panelX", -1L)
+                  setRaw(c, "panelY", -1L)
+              }
+          }
+          KT_EOF
+
+          cat > app/src/main/java/com/meu/autoclicker/MainActivity.kt <<'KT_EOF'
+          package com.meu.autoclicker
+
+          import android.animation.ObjectAnimator
+          import android.animation.PropertyValuesHolder
+          import android.animation.ValueAnimator
+          import android.app.Activity
+          import android.app.AlertDialog
+          import android.content.Intent
+          import android.graphics.Color
+          import android.graphics.drawable.GradientDrawable
+          import android.net.Uri
+          import android.os.Bundle
+          import android.provider.Settings
+          import android.view.Gravity
+          import android.view.View
+          import android.view.animation.DecelerateInterpolator
+          import android.widget.FrameLayout
+          import android.widget.LinearLayout
+          import android.widget.TextView
+
+          class MainActivity : Activity() {
+
+              private lateinit var p: Ui.Pal
+              private var accent = 0
+              private lateinit var glow: View
+              private lateinit var mainIcon: TextView
+              private lateinit var mainLabel: TextView
+              private lateinit var hint: TextView
+              private var pulse: ObjectAnimator? = null
+
+              private fun dp(v: Int) = Ui.dp(this, v)
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  p = Ui.pal(this)
+                  accent = Ui.accent(this)
+                  Ui.systemBars(this)
+
+                  val root = FrameLayout(this)
+                  root.setBackgroundColor(p.bg)
+
+                  val center = LinearLayout(this)
+                  center.orientation = LinearLayout.VERTICAL
+                  center.gravity = Gravity.CENTER_HORIZONTAL
+
+                  val box = FrameLayout(this)
+
+                  glow = View(this)
+                  val gg = GradientDrawable()
+                  gg.shape = GradientDrawable.OVAL
+                  gg.setColor(accent)
+                  glow.background = gg
+                  glow.alpha = 0f
+                  box.addView(glow, FrameLayout.LayoutParams(dp(190), dp(190), Gravity.CENTER))
+
+                  val btn = LinearLayout(this)
+                  btn.orientation = LinearLayout.VERTICAL
+                  btn.gravity = Gravity.CENTER
+                  val bg = GradientDrawable(GradientDrawable.Orientation.TL_BR, intArrayOf(accent, Ui.darken(accent, 0.6f)))
+                  bg.shape = GradientDrawable.OVAL
+                  btn.background = bg
+                  btn.elevation = dp(10).toFloat()
+                  mainIcon = Ui.text(this, "▶", 52f, Color.WHITE, true)
+                  mainIcon.gravity = Gravity.CENTER
+                  mainLabel = Ui.text(this, "Abrir painel", 15f, Color.WHITE, true)
+                  mainLabel.gravity = Gravity.CENTER
+                  btn.addView(mainIcon)
+                  btn.addView(mainLabel)
+                  btn.setOnClickListener { onMain() }
+                  Ui.press(btn)
+                  box.addView(btn, FrameLayout.LayoutParams(dp(190), dp(190), Gravity.CENTER))
+                  center.addView(box, LinearLayout.LayoutParams(dp(260), dp(260)))
+
+                  hint = Ui.text(this, "", 13f, p.muted)
+                  hint.gravity = Gravity.CENTER
+                  hint.setPadding(dp(24), dp(10), dp(24), 0)
+                  center.addView(hint)
+
+                  root.addView(
+                      center,
+                      FrameLayout.LayoutParams(
+                          FrameLayout.LayoutParams.MATCH_PARENT,
+                          FrameLayout.LayoutParams.WRAP_CONTENT,
+                          Gravity.CENTER
+                      )
+                  )
+
+                  val gear = Ui.text(this, "⚙", 24f, p.text)
+                  gear.gravity = Gravity.CENTER
+                  gear.contentDescription = "Configurações"
+                  gear.background = Ui.rounded(this, p.card, 16, 1, p.stroke)
+                  val glp = FrameLayout.LayoutParams(dp(50), dp(50), Gravity.TOP or Gravity.END)
+                  glp.setMargins(0, dp(40), dp(18), 0)
+                  gear.setOnClickListener { startActivity(Intent(this, SettingsActivity::class.java)) }
+                  Ui.press(gear)
+                  root.addView(gear, glp)
+
+                  setContentView(root)
+                  Ui.appear(center)
+              }
+
+              private fun onMain() {
+                  val s = ClickService.instance
+                  if (s == null) {
+                      askAccessibility()
+                      return
+                  }
+                  if (s.isPanelOpen()) {
+                      s.closePanelFromUi()
+                      refresh()
+                  } else {
+                      s.showPanel()
+                      moveTaskToBack(true)
+                  }
+              }
+
+              private fun askAccessibility() {
+                  val theme = if (p.light) android.R.style.Theme_DeviceDefault_Light_Dialog_Alert
+                  else android.R.style.Theme_DeviceDefault_Dialog_Alert
+                  AlertDialog.Builder(this, theme)
+                      .setTitle("Ative a acessibilidade")
+                      .setMessage(
+                          "Para tocar na tela por você, o app precisa do serviço de acessibilidade.\n\n" +
+                              "Toque em Abrir configurações, escolha Auto Clicker Pro e ative.\n\n" +
+                              "Se o Android bloquear, abra Informações do app e permita as configurações restritas."
+                      )
+                      .setPositiveButton("Abrir configurações") { _, _ ->
+                          startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                      }
+                      .setNeutralButton("Informações do app") { _, _ ->
+                          val i = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
+                          i.data = Uri.parse("package:" + packageName)
+                          startActivity(i)
+                      }
+                      .setNegativeButton("Agora não", null)
+                      .show()
+              }
+
+              private fun refresh() {
+                  val s = ClickService.instance
+                  if (s == null) {
+                      mainIcon.text = "▶"
+                      mainLabel.text = "Abrir painel"
+                      hint.text = "Ative o serviço de acessibilidade para usar"
+                      hint.setTextColor(p.red)
+                  } else if (s.isPanelOpen()) {
+                      mainIcon.text = "■"
+                      mainLabel.text = "Fechar painel"
+                      hint.text = "Painel aberto"
+                      hint.setTextColor(p.green)
+                  } else {
+                      mainIcon.text = "▶"
+                      mainLabel.text = "Abrir painel"
+                      hint.text = ""
+                  }
+              }
+
+              private fun startPulse() {
+                  stopPulse()
+                  val a = ObjectAnimator.ofPropertyValuesHolder(
+                      glow,
+                      PropertyValuesHolder.ofFloat("scaleX", 1f, 1.3f),
+                      PropertyValuesHolder.ofFloat("scaleY", 1f, 1.3f),
+                      PropertyValuesHolder.ofFloat("alpha", 0.45f, 0f)
+                  )
+                  a.duration = 2000L
+                  a.repeatCount = ValueAnimator.INFINITE
+                  a.interpolator = DecelerateInterpolator()
+                  a.start()
+                  pulse = a
+              }
+
+              private fun stopPulse() {
+                  pulse?.cancel()
+                  pulse = null
+                  glow.alpha = 0f
+              }
+
+              override fun onResume() {
+                  super.onResume()
+                  if (Ui.pal(this) !== p || Ui.accent(this) != accent) {
+                      recreate()
+                      return
+                  }
+                  refresh()
+                  startPulse()
+              }
+
+              override fun onPause() {
+                  stopPulse()
+                  super.onPause()
+              }
+          }
+          KT_EOF
+
+          cat > app/src/main/java/com/meu/autoclicker/ClickConfigActivity.kt <<'KT_EOF'
+          package com.meu.autoclicker
+
+          import android.app.Activity
+          import android.graphics.Color
+          import android.graphics.drawable.ColorDrawable
+          import android.os.Bundle
+          import android.text.InputFilter
+          import android.text.InputType
+          import android.view.Gravity
+          import android.view.ViewGroup
+          import android.view.WindowManager
+          import android.widget.EditText
+          import android.widget.LinearLayout
+          import android.widget.ScrollView
+
+          class ClickConfigActivity : Activity() {
+
+              private fun dp(v: Int) = Ui.dp(this, v)
+
+              private fun field(p: Ui.Pal, value: Long, maxLen: Int): EditText {
+                  val et = EditText(this)
+                  et.inputType = InputType.TYPE_CLASS_NUMBER
+                  et.filters = arrayOf<InputFilter>(InputFilter.LengthFilter(maxLen))
+                  et.setText(value.toString())
+                  et.setTextColor(p.text)
+                  et.textSize = 16f
+                  et.gravity = Gravity.CENTER
+                  et.background = Ui.rounded(this, p.field, 10, 1, p.stroke)
+                  et.setPadding(dp(4), dp(10), dp(4), dp(10))
+                  et.setSelectAllOnFocus(true)
+                  return et
+              }
+
+              private fun column(p: Ui.Pal, label: String, et: EditText): LinearLayout {
+                  val c = LinearLayout(this)
+                  c.orientation = LinearLayout.VERTICAL
+                  val lp = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                  lp.setMargins(dp(3), 0, dp(3), 0)
+                  c.layoutParams = lp
+                  val l = Ui.text(this, label, 11f, p.muted)
+                  l.gravity = Gravity.CENTER
+                  l.setPadding(0, 0, 0, dp(4))
+                  c.addView(l)
+                  c.addView(et)
+                  return c
+              }
+
+              private fun num(e: EditText): Long = e.text.toString().toLongOrNull() ?: 0L
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  window.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+                  window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
+                  window.setLayout((resources.displayMetrics.widthPixels * 0.94).toInt(), ViewGroup.LayoutParams.WRAP_CONTENT)
+
+                  val p = Ui.pal(this)
+                  val accent = Ui.accent(this)
+
+                  val svc = ClickService.instance
+                  val index = intent.getIntExtra("index", -1)
+                  val info = svc?.getActInfo(index)
+                  if (svc == null || info == null) {
+                      finish()
+                      return
+                  }
+
+                  val delay = info[0]
+                  val dur = info[1]
+                  val swipe = info[2] == 1L
+                  val shownDelay = if (delay >= 0) delay else Prefs.get(this, "interval")
+                  val shownDur = if (dur > 0) dur else if (swipe) Prefs.get(this, "swipeDur") else Prefs.get(this, "tapDur")
+
+                  val card = LinearLayout(this)
+                  card.orientation = LinearLayout.VERTICAL
+                  card.background = Ui.rounded(this, p.card, 18, 1, p.stroke)
+                  card.setPadding(dp(16), dp(16), dp(16), dp(18))
+
+                  card.addView(Ui.text(this, "Botão " + (index + 1), 20f, p.text, true))
+
+                  val l1 = Ui.text(this, "ATRASO ATÉ O PRÓXIMO BOTÃO", 11f, p.muted, true)
+                  l1.setPadding(0, dp(16), 0, dp(2))
+                  card.addView(l1)
+                  card.addView(Ui.text(this, "Tempo de espera depois deste botão, antes de apertar o próximo.", 12f, p.muted))
+
+                  val fH = field(p, shownDelay / 3600000L, 2)
+                  val fM = field(p, (shownDelay % 3600000L) / 60000L, 2)
+                  val fS = field(p, (shownDelay % 60000L) / 1000L, 2)
+                  val fMs = field(p, shownDelay % 1000L, 3)
+
+                  val row = LinearLayout(this)
+                  row.orientation = LinearLayout.HORIZONTAL
+                  row.layoutParams = Ui.lp(this, 10, 0)
+                  row.addView(column(p, "Horas", fH))
+                  row.addView(column(p, "Minutos", fM))
+                  row.addView(column(p, "Segundos", fS))
+                  row.addView(column(p, "Milésimos", fMs))
+                  card.addView(row)
+
+                  val l2 = Ui.text(this, if (swipe) "DURAÇÃO DO DESLIZE (ms)" else "DURAÇÃO DO TOQUE (ms)", 11f, p.muted, true)
+                  l2.setPadding(0, dp(18), 0, dp(6))
+                  card.addView(l2)
+                  val fDur = field(p, shownDur, 5)
+                  card.addView(fDur)
+
+                  card.addView(Ui.button(this, "Salvar", accent, Color.WHITE) {
+                      val total = (num(fH) * 3600000L + num(fM) * 60000L + num(fS) * 1000L + num(fMs))
+                          .coerceIn(10L, 360000000L)
+                      val d = num(fDur).coerceIn(1L, 60000L)
+                      svc.setActCustom(index, total, d)
+                      finish()
+                  })
+                  card.addView(Ui.button(this, "Usar padrão das configurações", p.field, p.text) {
+                      svc.setActCustom(index, -1L, -1L)
+                      finish()
+                  })
+                  card.addView(Ui.button(this, "Cancelar", p.field, p.muted) { finish() })
+
+                  val scroll = ScrollView(this)
+                  scroll.addView(card)
+                  setContentView(scroll)
+              }
+          }
+          KT_EOF
+
+          cat > app/src/main/java/com/meu/autoclicker/Ui.kt <<'KT_EOF'
+          package com.meu.autoclicker
+
+          import android.app.Activity
+          import android.content.Context
+          import android.graphics.Color
+          import android.graphics.Typeface
+          import android.graphics.drawable.GradientDrawable
+          import android.os.Build
+          import android.view.MotionEvent
+          import android.view.View
+          import android.widget.Button
+          import android.widget.LinearLayout
+          import android.widget.TextView
+
+          object Ui {
+
+              class Pal(
+                  val bg: Int,
+                  val card: Int,
+                  val stroke: Int,
+                  val green: Int,
+                  val red: Int,
+                  val text: Int,
+                  val muted: Int,
+                  val field: Int,
+                  val light: Boolean
+              )
+
+              private val dark = Pal(
+                  Color.parseColor("#0E1116"), Color.parseColor("#171B22"), Color.parseColor("#262C36"),
+                  Color.parseColor("#3DDC84"), Color.parseColor("#FF5C5C"),
+                  Color.parseColor("#ECEFF4"), Color.parseColor("#8B95A5"), Color.parseColor("#0E1116"), false
+              )
+
+              private val light = Pal(
+                  Color.parseColor("#F4F6FA"), Color.parseColor("#FFFFFF"), Color.parseColor("#E1E5EC"),
+                  Color.parseColor("#1FA85A"), Color.parseColor("#D93636"),
+                  Color.parseColor("#171B22"), Color.parseColor("#6B7585"), Color.parseColor("#F0F2F7"), true
+              )
+
+              val accents = intArrayOf(
+                  Color.parseColor("#4C8DFF"),
+                  Color.parseColor("#3DDC84"),
+                  Color.parseColor("#B388FF"),
+                  Color.parseColor("#FFA94D"),
+                  Color.parseColor("#FF6EA8")
+              )
+
+              fun pal(c: Context): Pal = if (Prefs.get(c, "theme") == 1L) light else dark
+
+              fun accent(c: Context): Int = accents[Prefs.get(c, "panelColor").toInt().coerceIn(0, accents.size - 1)]
+
+              fun darken(color: Int, f: Float): Int =
+                  Color.rgb((Color.red(color) * f).toInt(), (Color.green(color) * f).toInt(), (Color.blue(color) * f).toInt())
+
+              fun dp(c: Context, v: Int): Int = (v * c.resources.displayMetrics.density).toInt()
+
+              fun rounded(c: Context, color: Int, radius: Int, strokeW: Int = 0, strokeC: Int = 0): GradientDrawable {
+                  val g = GradientDrawable()
+                  g.setColor(color)
+                  g.cornerRadius = dp(c, radius).toFloat()
+                  if (strokeW > 0) g.setStroke(dp(c, strokeW), strokeC)
+                  return g
+              }
+
+              fun text(c: Context, t: String, size: Float, color: Int, bold: Boolean = false): TextView {
+                  val v = TextView(c)
+                  v.text = t
+                  v.textSize = size
+                  v.setTextColor(color)
+                  if (bold) v.typeface = Typeface.DEFAULT_BOLD
+                  return v
+              }
+
+              fun lp(c: Context, top: Int = 0, bottom: Int = 0): LinearLayout.LayoutParams {
+                  val l = LinearLayout.LayoutParams(
+                      LinearLayout.LayoutParams.MATCH_PARENT,
+                      LinearLayout.LayoutParams.WRAP_CONTENT
+                  )
+                  l.setMargins(0, dp(c, top), 0, dp(c, bottom))
+                  return l
+              }
+
+              // Efeito suave de "apertar" ao tocar
+              fun press(v: View) {
+                  v.setOnTouchListener { view, e ->
+                      when (e.action) {
+                          MotionEvent.ACTION_DOWN -> view.animate().scaleX(0.96f).scaleY(0.96f).setDuration(80).start()
+                          MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> view.animate().scaleX(1f).scaleY(1f).setDuration(120).start()
+                      }
+                      false
+                  }
+              }
+
+              fun button(c: Context, t: String, bg: Int, fg: Int, onClick: () -> Unit): Button {
+                  val b = Button(c)
+                  b.text = t
+                  b.isAllCaps = false
+                  b.textSize = 15f
+                  b.typeface = Typeface.DEFAULT_BOLD
+                  b.setTextColor(fg)
+                  b.background = rounded(c, bg, 14)
+                  b.stateListAnimator = null
+                  b.layoutParams = lp(c, 10, 0)
+                  b.setOnClickListener { onClick() }
+                  press(b)
+                  return b
+              }
+
+              fun card(c: Context): LinearLayout {
+                  val p = pal(c)
+                  val l = LinearLayout(c)
+                  l.orientation = LinearLayout.VERTICAL
+                  l.background = rounded(c, p.card, 16, 1, p.stroke)
+                  l.setPadding(dp(c, 16), dp(c, 14), dp(c, 16), dp(c, 16))
+                  l.layoutParams = lp(c, 0, 12)
+                  return l
+              }
+
+              fun appear(v: View) {
+                  v.alpha = 0f
+                  v.translationY = 24f
+                  v.animate().alpha(1f).translationY(0f).setDuration(220).start()
+              }
+
+              fun systemBars(a: Activity) {
+                  val p = pal(a)
+                  a.window.statusBarColor = p.bg
+                  a.window.navigationBarColor = p.bg
+                  var flags = 0
+                  if (p.light) {
+                      flags = View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR
+                      if (Build.VERSION.SDK_INT >= 26) flags = flags or View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR
+                  }
+                  a.window.decorView.systemUiVisibility = flags
+              }
+          }
+          KT_EOF
+
+          cat > app/src/main/java/com/meu/autoclicker/SettingsActivity.kt <<'KT_EOF'
+          package com.meu.autoclicker
+
+          import android.app.Activity
+          import android.app.AlertDialog
+          import android.content.Intent
+          import android.graphics.Color
+          import android.graphics.drawable.GradientDrawable
+          import android.net.Uri
+          import android.os.Bundle
+          import android.provider.Settings
+          import android.text.InputType
+          import android.view.Gravity
+          import android.view.View
+          import android.widget.EditText
+          import android.widget.LinearLayout
+          import android.widget.ScrollView
+          import android.widget.SeekBar
+          import android.widget.Switch
+          import android.widget.TextView
+          import android.widget.Toast
+          import java.text.SimpleDateFormat
+          import java.util.Date
+          import java.util.Locale
+
+          class SettingsActivity : Activity() {
+
+              private class Cat(val id: String, val icon: String, val title: String, val desc: String)
+
+              private val cats = listOf(
+                  Cat("clicks", "⚡", "Cliques", "Intervalo, duração e variações dos toques"),
+                  Cat("mode", "🎯", "Modo de operação", "Pontos, repetição automática e macros"),
+                  Cat("panel", "🎨", "Painel flutuante", "Tamanho, transparência, cor e posição"),
+                  Cat("access", "♿", "Acessibilidade e permissões", "Serviço necessário para tocar na tela"),
+                  Cat("safety", "🛡️", "Segurança", "Modo seguro e tempo máximo de execução"),
+                  Cat("profiles", "💾", "Perfis", "Salvar, carregar e restaurar configurações"),
+                  Cat("general", "⚙️", "Geral", "Tema e vibração"),
+                  Cat("about", "ℹ️", "Sobre o aplicativo", "Versão, privacidade e créditos")
+              )
+
+              private lateinit var p: Ui.Pal
+              private var accent = 0
+              private lateinit var content: LinearLayout
+              private lateinit var titleView: TextView
+              private var page = ""
+              private val inputs = LinkedHashMap<String, EditText>()
+
+              private fun dp(v: Int) = Ui.dp(this, v)
+
+              private fun toast(t: String) {
+                  Toast.makeText(this, t, Toast.LENGTH_SHORT).show()
+              }
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  p = Ui.pal(this)
+                  accent = Ui.accent(this)
+                  Ui.systemBars(this)
+
+                  val root = LinearLayout(this)
+                  root.orientation = LinearLayout.VERTICAL
+                  root.setBackgroundColor(p.bg)
+
+                  val header = LinearLayout(this)
+                  header.orientation = LinearLayout.HORIZONTAL
+                  header.gravity = Gravity.CENTER_VERTICAL
+                  header.setPadding(dp(14), dp(34), dp(14), dp(8))
+
+                  val back = Ui.text(this, "←", 22f, p.text, true)
+                  back.gravity = Gravity.CENTER
+                  back.contentDescription = "Voltar"
+                  back.background = Ui.rounded(this, p.card, 14, 1, p.stroke)
+                  back.layoutParams = LinearLayout.LayoutParams(dp(46), dp(46))
+                  back.setOnClickListener { goBack() }
+                  Ui.press(back)
+                  header.addView(back)
+
+                  titleView = Ui.text(this, "Configurações", 22f, p.text, true)
+                  titleView.setPadding(dp(14), 0, 0, 0)
+                  header.addView(titleView)
+                  root.addView(header)
+
+                  content = LinearLayout(this)
+                  content.orientation = LinearLayout.VERTICAL
+                  content.setPadding(dp(16), dp(8), dp(16), dp(28))
+                  val scroll = ScrollView(this)
+                  scroll.addView(content)
+                  root.addView(scroll, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
+                  setContentView(root)
+
+                  val pg = savedInstanceState?.getString("page") ?: ""
+                  if (pg.isEmpty()) showHome() else showPage(pg)
+              }
+
+              override fun onSaveInstanceState(outState: Bundle) {
+                  super.onSaveInstanceState(outState)
+                  outState.putString("page", page)
+              }
+
+              private fun goBack() {
+                  if (page.isEmpty()) finish() else showHome()
+              }
+
+              @Suppress("DEPRECATION", "OVERRIDE_DEPRECATION")
+              override fun onBackPressed() {
+                  goBack()
+              }
+
+              override fun onPause() {
+                  commit()
+                  super.onPause()
+              }
+
+              override fun onResume() {
+                  super.onResume()
+                  if (page == "access") showPage("access")
+              }
+
+              // ---- salvar campos numéricos da página atual
+              private fun commit() {
+                  for ((k, et) in inputs) {
+                      val v = et.text.toString().toLongOrNull() ?: continue
+                      Prefs.set(this, k, v)
+                  }
+              }
+
+              private fun commitAndShow() {
+                  commit()
+                  for ((k, et) in inputs) {
+                      et.setText(Prefs.get(this, k).toString())
+                  }
+                  toast("Salvo com sucesso!")
+              }
+
+              private fun begin(title: String, id: String) {
+                  commit()
+                  content.removeAllViews()
+                  inputs.clear()
+                  page = id
+                  titleView.text = title
+              }
+
+              // ---- tela inicial das configurações
+              private fun showHome() {
+                  begin("Configurações", "")
+                  for (c in cats) content.addView(catRow(c))
+                  Ui.appear(content)
+              }
+
+              private fun catRow(c: Cat): View {
+                  val row = LinearLayout(this)
+                  row.orientation = LinearLayout.HORIZONTAL
+                  row.gravity = Gravity.CENTER_VERTICAL
+                  row.background = Ui.rounded(this, p.card, 16, 1, p.stroke)
+                  row.setPadding(dp(14), dp(14), dp(14), dp(14))
+                  row.layoutParams = Ui.lp(this, 0, 10)
+
+                  val ic = Ui.text(this, c.icon, 20f, p.text)
+                  ic.gravity = Gravity.CENTER
+                  ic.background = Ui.rounded(this, Color.argb(40, Color.red(accent), Color.green(accent), Color.blue(accent)), 12)
+                  ic.layoutParams = LinearLayout.LayoutParams(dp(44), dp(44))
+                  row.addView(ic)
+
+                  val col = LinearLayout(this)
+                  col.orientation = LinearLayout.VERTICAL
+                  col.setPadding(dp(14), 0, dp(8), 0)
+                  col.addView(Ui.text(this, c.title, 16f, p.text, true))
+                  col.addView(Ui.text(this, c.desc, 12f, p.muted))
+                  row.addView(col, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+
+                  row.addView(Ui.text(this, "›", 26f, p.muted))
+                  row.setOnClickListener { showPage(c.id) }
+                  Ui.press(row)
+                  return row
+              }
+
+              // ---- páginas
+              private fun showPage(id: String) {
+                  val cat = cats.firstOrNull { it.id == id }
+                  if (cat == null) {
+                      showHome()
+                      return
+                  }
+                  begin(cat.title, id)
+                  when (id) {
+                      "clicks" -> numberPage(listOf("interval", "random", "tapDur", "swipeDur", "startDelay", "jitter"))
+                      "mode" -> modePage()
+                      "panel" -> panelPage()
+                      "access" -> accessPage()
+                      "safety" -> safetyPage()
+                      "profiles" -> profilesPage()
+                      "general" -> generalPage()
+                      "about" -> aboutPage()
+                  }
+                  Ui.appear(content)
+              }
+
+              private fun numberPage(keys: List<String>) {
+                  for (k in keys) {
+                      val f = Prefs.find(k) ?: continue
+                      content.addView(numberCard(f))
+                  }
+                  content.addView(Ui.button(this, "Salvar", accent, Color.WHITE) { commitAndShow() })
+              }
+
+              private fun numberCard(f: Prefs.Field): View {
+                  val card = Ui.card(this)
+                  card.addView(Ui.text(this, f.label, 15f, p.text, true))
+                  val d = Ui.text(this, f.desc, 12f, p.muted)
+                  d.setPadding(0, dp(2), 0, dp(10))
+                  card.addView(d)
+
+                  val row = LinearLayout(this)
+                  row.orientation = LinearLayout.HORIZONTAL
+                  row.gravity = Gravity.CENTER_VERTICAL
+
+                  val et = EditText(this)
+                  et.inputType = InputType.TYPE_CLASS_NUMBER
+                  et.setText(Prefs.get(this, f.key).toString())
+                  et.setTextColor(p.text)
+                  et.textSize = 16f
+                  et.background = Ui.rounded(this, p.field, 10, 1, p.stroke)
+                  et.setPadding(dp(12), dp(10), dp(12), dp(10))
+                  et.setSelectAllOnFocus(true)
+                  row.addView(et, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+
+                  val unit = Ui.text(this, f.unit, 14f, p.muted)
+                  unit.setPadding(dp(12), 0, 0, 0)
+                  row.addView(unit)
+                  card.addView(row)
+
+                  val range = Ui.text(this, "Valores de " + f.min + " a " + f.max, 11f, p.muted)
+                  range.setPadding(0, dp(6), 0, 0)
+                  card.addView(range)
+
+                  inputs[f.key] = et
+                  return card
+              }
+
+              private fun switchRow(title: String, desc: String, key: String): View {
+                  val card = Ui.card(this)
+                  val row = LinearLayout(this)
+                  row.orientation = LinearLayout.HORIZONTAL
+                  row.gravity = Gravity.CENTER_VERTICAL
+                  val col = LinearLayout(this)
+                  col.orientation = LinearLayout.VERTICAL
+                  col.setPadding(0, 0, dp(12), 0)
+                  col.addView(Ui.text(this, title, 15f, p.text, true))
+                  col.addView(Ui.text(this, desc, 12f, p.muted))
+                  row.addView(col, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+                  val sw = Switch(this)
+                  sw.isChecked = Prefs.get(this, key) == 1L
+                  sw.setOnCheckedChangeListener { _, on -> Prefs.set(this, key, if (on) 1L else 0L) }
+                  row.addView(sw)
+                  card.addView(row)
+                  return card
+              }
+
+              private fun infoCard(title: String, body: String): View {
+                  val card = Ui.card(this)
+                  card.addView(Ui.text(this, title, 15f, p.text, true))
+                  val t = Ui.text(this, body, 13f, p.muted)
+                  t.setPadding(0, dp(6), 0, 0)
+                  t.setLineSpacing(dp(3).toFloat(), 1f)
+                  card.addView(t)
+                  return card
+              }
+
+              // Modo de operação
+              private fun modePage() {
+                  content.addView(
+                      infoCard(
+                          "Como usar",
+                          "• Clique único: adicione 1 ponto (👆) no painel.\n" +
+                              "• Múltiplos pontos: adicione vários pontos; eles são tocados em ordem.\n" +
+                              "• Deslize: o botão ↔ cria os pontos A e B.\n" +
+                              "• Gravar: o botão ⏺ grava seus movimentos e repete.\n" +
+                              "• Toque 2 vezes em um ponto para ajustar o tempo dele."
+                      )
+                  )
+                  numberPage(listOf("repeats"))
+              }
+
+              // Painel flutuante
+              private fun panelPage() {
+                  content.addView(seekRow("Tamanho", "panelScale", 60, 150, "%"))
+                  content.addView(seekRow("Opacidade", "panelAlpha", 30, 100, "%"))
+                  content.addView(colorCard())
+                  content.addView(Ui.button(this, "Restaurar posição do painel", p.card, p.text) {
+                      Prefs.setRaw(this, "panelX", -1L)
+                      Prefs.setRaw(this, "panelY", -1L)
+                      ClickService.instance?.refreshPanel()
+                      toast("Posição restaurada")
+                  })
+                  val tip = Ui.text(this, "Para mover o painel, arraste o botão ☰ dele. A posição fica salva.", 12f, p.muted)
+                  tip.setPadding(0, dp(12), 0, 0)
+                  content.addView(tip)
+              }
+
+              private fun seekRow(title: String, key: String, min: Int, max: Int, unit: String): View {
+                  val card = Ui.card(this)
+                  val head = LinearLayout(this)
+                  head.orientation = LinearLayout.HORIZONTAL
+                  val t = Ui.text(this, title, 15f, p.text, true)
+                  head.addView(t, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+                  val cur = Prefs.get(this, key).toInt()
+                  val value = Ui.text(this, "" + cur + unit, 15f, accent, true)
+                  head.addView(value)
+                  card.addView(head)
+
+                  val sb = SeekBar(this)
+                  sb.max = max - min
+                  sb.progress = (cur - min).coerceIn(0, max - min)
+                  sb.setPadding(0, dp(14), 0, dp(4))
+                  sb.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                      override fun onProgressChanged(s: SeekBar?, v: Int, fromUser: Boolean) {
+                          val nv = v + min
+                          value.text = "" + nv + unit
+                          if (fromUser) Prefs.set(this@SettingsActivity, key, nv.toLong())
+                      }
+
+                      override fun onStartTrackingTouch(s: SeekBar?) {}
+
+                      override fun onStopTrackingTouch(s: SeekBar?) {
+                          ClickService.instance?.refreshPanel()
+                      }
+                  })
+                  card.addView(sb)
+                  return card
+              }
+
+              private fun colorCard(): View {
+                  val card = Ui.card(this)
+                  card.addView(Ui.text(this, "Cor dos controles", 15f, p.text, true))
+                  val row = LinearLayout(this)
+                  row.orientation = LinearLayout.HORIZONTAL
+                  row.setPadding(0, dp(12), 0, 0)
+                  val sel = Prefs.get(this, "panelColor").toInt()
+                  for (i in Ui.accents.indices) {
+                      val dot = View(this)
+                      val g = GradientDrawable()
+                      g.shape = GradientDrawable.OVAL
+                      g.setColor(Ui.accents[i])
+                      if (i == sel) g.setStroke(dp(3), p.text)
+                      dot.background = g
+                      dot.setOnClickListener {
+                          Prefs.set(this, "panelColor", i.toLong())
+                          accent = Ui.accent(this)
+                          ClickService.instance?.refreshPanel()
+                          showPage("panel")
+                      }
+                      Ui.press(dot)
+                      val lp = LinearLayout.LayoutParams(dp(40), dp(40))
+                      lp.setMargins(0, 0, dp(12), 0)
+                      row.addView(dot, lp)
+                  }
+                  card.addView(row)
+                  return card
+              }
+
+              // Acessibilidade e permissões
+              private fun accessPage() {
+                  val active = ClickService.instance != null
+                  val card = Ui.card(this)
+                  card.addView(Ui.text(this, "Serviço de acessibilidade", 15f, p.text, true))
+                  val st = Ui.text(this, if (active) "● Ativo" else "● Desativado", 16f, if (active) p.green else p.red, true)
+                  st.setPadding(0, dp(6), 0, dp(6))
+                  card.addView(st)
+                  card.addView(
+                      Ui.text(
+                          this,
+                          "Necessário para o app tocar e deslizar na tela. O app não lê o que aparece na tela.",
+                          12f, p.muted
+                      )
+                  )
+                  content.addView(card)
+
+                  content.addView(Ui.button(this, "Abrir configurações de acessibilidade", accent, Color.WHITE) {
+                      startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                  })
+                  content.addView(Ui.button(this, "Informações do app", p.card, p.text) {
+                      val i = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
+                      i.data = Uri.parse("package:" + packageName)
+                      startActivity(i)
+                  })
+
+                  val tips = infoCard(
+                      "Se o Android bloquear",
+                      "• Em Informações do app, toque nos três pontinhos e escolha Permitir configurações restritas.\n" +
+                          "• Se a Proteção Avançada ou o Play Protect bloquearem o app, é preciso desativá-los nas configurações do Android."
+                  )
+                  tips.layoutParams = Ui.lp(this, 14, 12)
+                  content.addView(tips)
+              }
+
+              // Segurança
+              private fun safetyPage() {
+                  content.addView(
+                      switchRow(
+                          "Modo seguro",
+                          "Bloqueia o auto clicker em apps de banco, pagamentos, loja de apps e configurações.",
+                          "safeMode"
+                      )
+                  )
+                  numberPage(listOf("maxMinutes"))
+                  val prot = infoCard(
+                      "Outras proteções (sempre ativas)",
+                      "• Chacoalhe o celular para parar na hora.\n" +
+                          "• Para automaticamente quando a tela desliga.\n" +
+                          "• O app não usa internet e não lê o conteúdo da tela."
+                  )
+                  prot.layoutParams = Ui.lp(this, 14, 12)
+                  content.addView(prot)
+              }
+
+              // Perfis
+              private fun profilesPage() {
+                  for (slot in 1..3) content.addView(profileCard(slot))
+                  content.addView(Ui.button(this, "Restaurar padrões", p.card, p.red) { confirmReset() })
+              }
+
+              private fun fmtDate(ms: Long): String =
+                  SimpleDateFormat("dd/MM/yyyy HH:mm", Locale.getDefault()).format(Date(ms))
+
+              private fun profileCard(slot: Int): View {
+                  val has = Prefs.hasProfile(this, slot)
+                  val card = Ui.card(this)
+                  card.addView(Ui.text(this, "Perfil " + slot, 15f, p.text, true))
+                  val sub = Ui.text(this, if (has) "Salvo em " + fmtDate(Prefs.profileTime(this, slot)) else "Vazio", 12f, p.muted)
+                  sub.setPadding(0, dp(2), 0, dp(4))
+                  card.addView(sub)
+
+                  val row = LinearLayout(this)
+                  row.orientation = LinearLayout.HORIZONTAL
+
+                  val save = Ui.button(this, "Salvar atual", accent, Color.WHITE) {
+                      commit()
+                      Prefs.saveProfile(this, slot)
+                      toast("Perfil " + slot + " salvo")
+                      showPage("profiles")
+                  }
+                  val sl = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                  sl.setMargins(0, dp(10), dp(6), 0)
+                  save.layoutParams = sl
+
+                  val load = Ui.button(this, "Carregar", p.field, if (has) p.text else p.muted) {
+                      if (has) {
+                          Prefs.loadProfile(this, slot)
+                          ClickService.instance?.refreshPanel()
+                          accent = Ui.accent(this)
+                          toast("Perfil " + slot + " carregado")
+                          showPage("profiles")
+                      } else {
+                          toast("Este perfil está vazio")
+                      }
+                  }
+                  val ll = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                  ll.setMargins(dp(6), dp(10), 0, 0)
+                  load.layoutParams = ll
+
+                  row.addView(save)
+                  row.addView(load)
+                  card.addView(row)
+                  return card
+              }
+
+              private fun dialogTheme(): Int =
+                  if (p.light) android.R.style.Theme_DeviceDefault_Light_Dialog_Alert
+                  else android.R.style.Theme_DeviceDefault_Dialog_Alert
+
+              private fun confirmReset() {
+                  AlertDialog.Builder(this, dialogTheme())
+                      .setTitle("Restaurar padrões?")
+                      .setMessage("Todas as configurações voltam ao valor original. Os perfis salvos não são apagados.")
+                      .setPositiveButton("Restaurar") { _, _ ->
+                          Prefs.resetAll(this)
+                          ClickService.instance?.refreshPanel()
+                          accent = Ui.accent(this)
+                          toast("Configurações restauradas")
+                          showPage("profiles")
+                      }
+                      .setNegativeButton("Cancelar", null)
+                      .show()
+              }
+
+              // Geral
+              private fun generalPage() {
+                  val card = Ui.card(this)
+                  card.addView(Ui.text(this, "Tema", 15f, p.text, true))
+                  val row = LinearLayout(this)
+                  row.orientation = LinearLayout.HORIZONTAL
+                  val cur = Prefs.get(this, "theme")
+
+                  val dk = Ui.button(this, "Escuro", if (cur == 0L) accent else p.field, if (cur == 0L) Color.WHITE else p.text) {
+                      Prefs.set(this, "theme", 0L)
+                      recreate()
+                  }
+                  val dl = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                  dl.setMargins(0, dp(10), dp(6), 0)
+                  dk.layoutParams = dl
+
+                  val lt = Ui.button(this, "Claro", if (cur == 1L) accent else p.field, if (cur == 1L) Color.WHITE else p.text) {
+                      Prefs.set(this, "theme", 1L)
+                      recreate()
+                  }
+                  val ll = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                  ll.setMargins(dp(6), dp(10), 0, 0)
+                  lt.layoutParams = ll
+
+                  row.addView(dk)
+                  row.addView(lt)
+                  card.addView(row)
+                  content.addView(card)
+
+                  content.addView(switchRow("Vibração", "Vibra ao iniciar e quando uma proteção parar o auto clicker.", "vibrate"))
+              }
+
+              // Sobre
+              private fun aboutPage() {
+                  val ver = try {
+                      packageManager.getPackageInfo(packageName, 0).versionName ?: ""
+                  } catch (e: Exception) {
+                      ""
+                  }
+                  val head = Ui.card(this)
+                  head.addView(Ui.text(this, "Auto Clicker Pro", 20f, p.text, true))
+                  val v = Ui.text(this, "Versão " + ver, 13f, p.muted)
+                  v.setPadding(0, dp(4), 0, 0)
+                  head.addView(v)
+                  content.addView(head)
+
+                  content.addView(
+                      infoCard(
+                          "Privacidade",
+                          "O app não pede permissão de internet e não envia nenhum dado. " +
+                              "As configurações ficam salvas apenas neste aparelho."
+                      )
+                  )
+                  content.addView(
+                      infoCard(
+                          "Permissões usadas",
+                          "• Serviço de acessibilidade: somente para executar toques e deslizes.\n" +
+                              "• Vibração: para avisos."
+                      )
+                  )
+                  content.addView(
+                      infoCard(
+                          "Créditos",
+                          "Aplicativo independente, feito em Kotlin com componentes nativos do Android. " +
+                              "Compilado e assinado automaticamente pelo GitHub Actions."
+                      )
+                  )
+              }
+          }
+          KT_EOF
+
+          cat > app/src/main/java/com/meu/autoclicker/ClickService.kt <<'KT_EOF'
+          package com.meu.autoclicker
+
+          import android.accessibilityservice.AccessibilityService
+          import android.accessibilityservice.GestureDescription
+          import android.content.BroadcastReceiver
+          import android.content.Context
+          import android.content.Intent
+          import android.content.IntentFilter
+          import android.graphics.Color
+          import android.graphics.Path
+          import android.graphics.PixelFormat
+          import android.graphics.Typeface
+          import android.graphics.drawable.GradientDrawable
+          import android.hardware.Sensor
+          import android.hardware.SensorEvent
+          import android.hardware.SensorEventListener
+          import android.hardware.SensorManager
+          import android.os.Handler
+          import android.os.Looper
+          import android.os.SystemClock
+          import android.os.Vibrator
+          import android.view.Gravity
+          import android.view.MotionEvent
+          import android.view.View
+          import android.view.WindowManager
+          import android.view.accessibility.AccessibilityEvent
+          import android.widget.LinearLayout
+          import android.widget.TextView
+          import android.widget.Toast
+          import kotlin.math.abs
+          import kotlin.math.sqrt
+          import kotlin.random.Random
+
+          class ClickService : AccessibilityService(), SensorEventListener {
+
+              companion object {
+                  @Volatile
+                  var instance: ClickService? = null
+
+                  // Apps onde o auto clicker nunca deve rodar no modo seguro
+                  private val BLOCKED = setOf(
+                      "com.android.settings",
+                      "com.android.packageinstaller",
+                      "com.google.android.packageinstaller",
+                      "com.android.vending",
+                      "com.google.android.gms",
+                      "com.google.android.apps.walletnfcrel",
+                      "com.google.android.apps.nbu.paisa.user",
+                      "com.google.android.apps.authenticator2",
+                      "com.nu.production",
+                      "com.itau",
+                      "com.bradesco",
+                      "br.com.bb.android",
+                      "com.mercadopago.wallet",
+                      "com.picpay",
+                      "com.paypal.android.p2pmobile"
+                  )
+              }
+
+              class Act(
+                  val swipe: Boolean,
+                  val a: TextView,
+                  val b: TextView?,
+                  var customDelay: Long = -1L,
+                  var customDuration: Long = -1L
+              )
+
+              class MacroStep(val path: Path, val duration: Long, var delayAfter: Long = 500L)
+
+              private lateinit var wm: WindowManager
+              private val handler = Handler(Looper.getMainLooper())
+              private val acts = ArrayList<Act>()
+              private val macroSteps = ArrayList<MacroStep>()
+
+              private var panel: View? = null
+              private var panelLp: WindowManager.LayoutParams? = null
+              private var playBtn: TextView? = null
+              private var recBtn: TextView? = null
+          private var recordingOverlay: View? = null
+          private var recLp: WindowManager.LayoutParams? = null
+
+              private var running = false
+              private var recording = false
+              private var runGen = 0
+              private var idx = 0
+              private var cycles = 0
+              private var runStart = 0L
+
+              private var sensorManager: SensorManager? = null
+              private var accelerometer: Sensor? = null
+              private var shakeOn = false
+              private var lastShakeTime = 0L
+              private var currentPkg = ""
+              private var receiverOn = false
+
+              private val screenReceiver = object : BroadcastReceiver() {
+                  override fun onReceive(c: Context?, i: Intent?) {
+                      if (running || recording) {
+                          stopRun()
+                          stopRecording()
+                          toast("🔒 Tela desligada: auto clicker parado")
+                      }
+                  }
+              }
+
+              private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+              private fun markerSize() = dp(52)
+
+              override fun onServiceConnected() {
+                  super.onServiceConnected()
+                  instance = this
+                  wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+
+                  sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
+                  accelerometer = sensorManager?.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
+
+                  if (!receiverOn) {
+                      registerReceiver(screenReceiver, IntentFilter(Intent.ACTION_SCREEN_OFF))
+                      receiverOn = true
+                  }
+              }
+
+              // Sensor só fica ligado enquanto algo está rodando (economiza bateria)
+              private fun enableShake() {
+                  if (shakeOn) return
+                  accelerometer?.let {
+                      sensorManager?.registerListener(this, it, SensorManager.SENSOR_DELAY_UI)
+                      shakeOn = true
+                  }
+              }
+
+              private fun disableShake() {
+                  if (!shakeOn) return
+                  sensorManager?.unregisterListener(this)
+                  shakeOn = false
+              }
+
+              override fun onSensorChanged(event: SensorEvent?) {
+                  if (event == null) return
+                  val x = event.values[0] / 9.80665
+                  val y = event.values[1] / 9.80665
+                  val z = event.values[2] / 9.80665
+                  val gForce = sqrt(x * x + y * y + z * z)
+
+                  if (gForce > 2.7) {
+                      val now = System.currentTimeMillis()
+                      if (now - lastShakeTime > 1500) {
+                          lastShakeTime = now
+                          if (running || recording) {
+                              stopRun()
+                              stopRecording()
+                              toast("🛡️ Parada de Emergência: Agitação detectada!")
+                              buzz(200)
+                          }
+                      }
+                  }
+              }
+
+              override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
+
+              private fun isBlocked(pkg: String): Boolean {
+                  if (Prefs.get(this, "safeMode") != 1L) return false
+                  if (pkg.isEmpty()) return false
+                  return pkg in BLOCKED || pkg.contains("bank") || pkg.contains("banco") || pkg.contains("wallet")
+              }
+
+              override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+                  if (event == null || event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
+                  val pkg = event.packageName?.toString() ?: return
+                  if (pkg == packageName) return
+                  currentPkg = pkg
+                  if (running && isBlocked(pkg)) {
+                      stopRun()
+                      toast("🛡️ Modo seguro: app sensível detectado, parado")
+                      buzz(200)
+                  }
+              }
+
+              override fun onInterrupt() {
+                  stopRun()
+                  stopRecording()
+              }
+
+              private fun cleanup() {
+                  closeAll()
+                  disableShake()
+                  if (receiverOn) {
+                      try { unregisterReceiver(screenReceiver) } catch (_: Exception) {}
+                      receiverOn = false
+                  }
+                  instance = null
+              }
+
+              override fun onUnbind(intent: Intent?): Boolean {
+                  cleanup()
+                  return super.onUnbind(intent)
+              }
+
+              override fun onDestroy() {
+                  cleanup()
+                  super.onDestroy()
+              }
+
+              @Suppress("DEPRECATION")
+              private fun buzz(ms: Long) {
+                  try {
+                      if (Prefs.get(this, "vibrate") == 1L) {
+                          (getSystemService(Context.VIBRATOR_SERVICE) as Vibrator).vibrate(ms)
+                      }
+                  } catch (_: Exception) {}
+              }
+
+              private fun roundBtn(t: String, color: Int): TextView {
+                  val v = TextView(this)
+                  v.text = t
+                  v.textSize = 16f * scalePct() / 100f
+                  v.setTextColor(Color.WHITE)
+                  v.gravity = Gravity.CENTER
+                  val bg = GradientDrawable()
+                  bg.shape = GradientDrawable.OVAL
+                  bg.setColor(color)
+                  v.background = bg
+                  val lp = LinearLayout.LayoutParams(dp(40) * scalePct() / 100, dp(40) * scalePct() / 100)
+                  lp.setMargins(dp(3), 0, dp(3), 0)
+                  v.layoutParams = lp
+                  return v
+              }
+
+              fun showPanel() {
+                  if (panel != null) return
+                  val accent = Ui.accent(this)
+
+                  val row = LinearLayout(this)
+                  row.orientation = LinearLayout.HORIZONTAL
+                  row.gravity = Gravity.CENTER_VERTICAL
+                  val bg = GradientDrawable()
+                  bg.setColor(Color.argb(245, 18, 22, 29))
+                  bg.cornerRadius = dp(30).toFloat()
+                  bg.setStroke(dp(1), Color.argb(255, 48, 56, 70))
+                  row.background = bg
+                  row.setPadding(dp(8), dp(6), dp(8), dp(6))
+                  row.alpha = Prefs.get(this, "panelAlpha").toInt() / 100f
+
+                  val lp = WindowManager.LayoutParams(
+                      WindowManager.LayoutParams.WRAP_CONTENT,
+                      WindowManager.LayoutParams.WRAP_CONTENT,
+                      WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+                      WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                          WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
+                          WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                      PixelFormat.TRANSLUCENT
+                  )
+                  lp.gravity = Gravity.TOP or Gravity.START
+                  val sx = Prefs.getRaw(this, "panelX", -1L)
+                  val sy = Prefs.getRaw(this, "panelY", -1L)
+                  val dmp = resources.displayMetrics
+                  lp.x = if (sx >= 0) sx.toInt().coerceIn(0, dmp.widthPixels - dp(60)) else dp(16)
+                  lp.y = if (sy >= 0) sy.toInt().coerceIn(0, dmp.heightPixels - dp(100)) else dp(200)
+                  // posição inicial definida acima
+
+                  val handle = roundBtn("☰", Color.rgb(48, 56, 70))
+                  var downX = 0f
+                  var downY = 0f
+                  var startX = 0
+                  var startY = 0
+          handle.setOnTouchListener { _, e ->
+              when (e.action) {
+                  MotionEvent.ACTION_DOWN -> {
+                      downX = e.rawX
+                      downY = e.rawY
+                      startX = lp.x
+                      startY = lp.y
+                  }
+                  MotionEvent.ACTION_MOVE -> {
+                      lp.x = startX + (e.rawX - downX).toInt()
+                      lp.y = startY + (e.rawY - downY).toInt()
+                      try { wm.updateViewLayout(row, lp) } catch (_: Exception) {}
+                  }
+                  MotionEvent.ACTION_UP -> {
+                      Prefs.setRaw(this, "panelX", lp.x.toLong().coerceAtLeast(0L))
+                      Prefs.setRaw(this, "panelY", lp.y.toLong().coerceAtLeast(0L))
+                  }
+              }
+              true
+          }
+                  row.addView(handle)
+
+                  val play = roundBtn("▶", Color.rgb(46, 160, 90))
+                  play.setOnClickListener { if (running) stopRun() else startRun() }
+                  playBtn = play
+                  row.addView(play)
+
+                  val rec = roundBtn("⏺", Color.rgb(200, 60, 60))
+                  rec.setOnClickListener { if (recording) stopRecording() else startRecording() }
+                  recBtn = rec
+                  row.addView(rec)
+
+                  val tap = roundBtn("👆", accent)
+                  tap.setOnClickListener { addTap() }
+                  row.addView(tap)
+
+                  val swipe = roundBtn("↔", accent)
+                  swipe.setOnClickListener { addSwipe() }
+                  row.addView(swipe)
+
+                  val del = roundBtn("🗑", Color.rgb(48, 56, 70))
+                  del.setOnClickListener { removeLast() }
+                  del.setOnLongClickListener {
+                      if (!running && !recording) {
+                          clearAll()
+                          macroSteps.clear()
+                          toast("Todos os pontos e macros apagados")
+                      }
+                      true
+                  }
+                  row.addView(del)
+
+                  val cfg = roundBtn("⚙", Color.rgb(48, 56, 70))
+                  cfg.setOnClickListener {
+                      val i = Intent(this, SettingsActivity::class.java)
+                      i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                      startActivity(i)
+                  }
+                  row.addView(cfg)
+
+                  val close = roundBtn("✕", Color.rgb(48, 56, 70))
+                  close.setOnClickListener { closeAll() }
+                  row.addView(close)
+
+                  wm.addView(row, lp)
+                  panel = row
+                  panelLp = lp
+              }
+
+              fun isPanelOpen(): Boolean = panel != null
+
+              fun closePanelFromUi() {
+                  closeAll()
+              }
+
+              // Recria o painel para aplicar tamanho, opacidade, cor e posição novos
+              fun refreshPanel() {
+                  if (panel != null && !running && !recording) {
+                      hidePanel()
+                      showPanel()
+                  }
+              }
+
+              private fun scalePct(): Int = Prefs.get(this, "panelScale").toInt()
+
+              private fun hidePanel() {
+                  panel?.let { try { wm.removeView(it) } catch (_: Exception) {} }
+                  panel = null
+                  panelLp = null
+                  playBtn = null
+                  recBtn = null
+              }
+
+              // Mantém o painel sempre acima da camada de gravação para poder parar
+              private fun bringPanelToFront() {
+                  val p = panel ?: return
+                  val l = panelLp ?: return
+                  try {
+                      wm.removeView(p)
+                      wm.addView(p, l)
+                  } catch (_: Exception) {}
+              }
+
+              private fun closeAll() {
+                  stopRun()
+                  stopRecording()
+                  clearAll()
+                  hidePanel()
+              }
+
+              private fun toast(t: String) {
+                  Toast.makeText(this, t, Toast.LENGTH_SHORT).show()
+              }
+
+              private fun makeMarker(label: String, color: Int, x: Int, y: Int): TextView {
+                  val size = markerSize()
+                  val m = TextView(this)
+                  m.text = label
+                  m.setTextColor(Color.WHITE)
+                  m.textSize = 15f
+                  m.typeface = Typeface.DEFAULT_BOLD
+                  m.gravity = Gravity.CENTER
+                  val bg = GradientDrawable()
+                  bg.shape = GradientDrawable.OVAL
+                  bg.setColor(Color.argb(200, Color.red(color), Color.green(color), Color.blue(color)))
+                  bg.setStroke(dp(3), Color.WHITE)
+                  m.background = bg
+                  m.alpha = 0.92f
+
+                  val lp = WindowManager.LayoutParams(
+                      size, size,
+                      WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+                      WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                          WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
+                          WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                      PixelFormat.TRANSLUCENT
+                  )
+                  lp.gravity = Gravity.TOP or Gravity.START
+                  lp.x = x
+                  lp.y = y
+                  m.tag = lp
+
+                  var downX = 0f
+                  var downY = 0f
+                  var startX = 0
+                  var startY = 0
+          var lastTap = 0L
+          m.setOnTouchListener { _, e ->
+              when (e.action) {
+                  MotionEvent.ACTION_DOWN -> {
+                      downX = e.rawX
+                      downY = e.rawY
+                      startX = lp.x
+                      startY = lp.y
+                  }
+                  MotionEvent.ACTION_MOVE -> {
+                      lp.x = startX + (e.rawX - downX).toInt()
+                      lp.y = startY + (e.rawY - downY).toInt()
+                      try { wm.updateViewLayout(m, lp) } catch (_: Exception) {}
+                  }
+                  MotionEvent.ACTION_UP -> {
+                      // Toque duplo (sem arrastar) abre as configurações deste botão
+                      val moved = abs(e.rawX - downX) > dp(8) || abs(e.rawY - downY) > dp(8)
+                      if (!moved && !running && !recording) {
+                          val now = SystemClock.elapsedRealtime()
+                          if (now - lastTap < 400) {
+                              lastTap = 0L
+                              val i = acts.indexOfFirst { it.a === m || it.b === m }
+                              if (i >= 0) openConfig(i)
+                          } else {
+                              lastTap = now
+                          }
+                      }
+                  }
+              }
+              true
+          }
+          wm.addView(m, lp)
+                  return m
+              }
+
+              private fun lpOf(v: View): WindowManager.LayoutParams = v.tag as WindowManager.LayoutParams
+
+              private fun addTap() {
+                  if (running || recording) {
+                      toast("Pare a execução ou gravação primeiro")
+                      return
+                  }
+                  val n = acts.size + 1
+                  val dm = resources.displayMetrics
+                  val size = markerSize()
+                  val off = (n % 5) * dp(20)
+                  val x = dm.widthPixels / 2 - size / 2 + off
+                  val y = dm.heightPixels / 2 - size / 2 + off
+                  val m = makeMarker(n.toString(), Color.rgb(33, 150, 243), x, y)
+                  acts.add(Act(false, m, null))
+              }
+
+              private fun addSwipe() {
+                  if (running || recording) {
+                      toast("Pare a execução ou gravação primeiro")
+                      return
+                  }
+                  val n = acts.size + 1
+                  val dm = resources.displayMetrics
+                  val size = markerSize()
+                  val x = dm.widthPixels / 2 - size / 2
+                  val y = dm.heightPixels / 2 - size / 2
+                  val a = makeMarker(n.toString() + "A", Color.rgb(76, 175, 80), x, y - dp(100))
+                  val b = makeMarker(n.toString() + "B", Color.rgb(244, 67, 54), x, y + dp(100))
+                  acts.add(Act(true, a, b))
+              }
+
+              private fun removeLast() {
+                  if (running || recording) return
+                  if (acts.isEmpty()) return
+                  val last = acts.removeAt(acts.size - 1)
+                  try { wm.removeView(last.a) } catch (_: Exception) {}
+                  last.b?.let { try { wm.removeView(it) } catch (_: Exception) {} }
+              }
+
+              private fun clearAll() {
+                  for (a in acts) {
+                      try { wm.removeView(a.a) } catch (_: Exception) {}
+                      a.b?.let { try { wm.removeView(it) } catch (_: Exception) {} }
+                  }
+                  acts.clear()
+              }
+
+          private fun startRecording() {
+              if (running) return
+              if (isBlocked(currentPkg)) {
+                  toast("🛡️ Modo seguro: gravação bloqueada neste app")
+                  return
+              }
+              clearAll()
+              macroSteps.clear()
+              recording = true
+              enableShake()
+              recBtn?.text = "⏹"
+              toast("Gravando! Use a tela normalmente: o movimento acontece assim que você soltar o dedo.")
+
+              val lp = WindowManager.LayoutParams(
+                  WindowManager.LayoutParams.MATCH_PARENT,
+                  WindowManager.LayoutParams.MATCH_PARENT,
+                  WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+                  WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                      WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
+                      WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                  PixelFormat.TRANSLUCENT
+              )
+
+              val overlay = View(this)
+              overlay.setBackgroundColor(Color.argb(20, 255, 60, 60))
+              var startTime = 0L
+              var lastUpTime = 0L
+              val currentPath = Path()
+
+              overlay.setOnTouchListener { _, e ->
+                  val now = System.currentTimeMillis()
+                  when (e.action) {
+                      MotionEvent.ACTION_DOWN -> {
+                          startTime = now
+                          // Tempo de espera real entre o fim do gesto anterior e este
+                          if (macroSteps.isNotEmpty() && lastUpTime > 0L) {
+                              macroSteps[macroSteps.size - 1].delayAfter = (now - lastUpTime).coerceAtLeast(10L)
+                          }
+                          currentPath.reset()
+                          currentPath.moveTo(e.rawX, e.rawY)
+                      }
+                      MotionEvent.ACTION_MOVE -> {
+                          currentPath.lineTo(e.rawX, e.rawY)
+                      }
+                      MotionEvent.ACTION_UP -> {
+                          val touchDuration = (now - startTime).coerceAtLeast(20L)
+                          lastUpTime = now
+                          macroSteps.add(MacroStep(Path(currentPath), touchDuration))
+                          // Repete o gesto na tela para o app por baixo reagir
+                          replayLive(Path(currentPath), touchDuration)
+                      }
+                      MotionEvent.ACTION_CANCEL -> {
+                          val touchDuration = (now - startTime).coerceAtLeast(20L)
+                          lastUpTime = now
+                          macroSteps.add(MacroStep(Path(currentPath), touchDuration))
+                      }
+                  }
+                  true
+              }
+
+              recLp = lp
+              wm.addView(overlay, lp)
+              recordingOverlay = overlay
+              bringPanelToFront()
+          }
+
+          // Deixa a camada de gravação "transparente ao toque" para o gesto repetido chegar no app
+          private fun setRecordingTouchable(on: Boolean) {
+              val v = recordingOverlay ?: return
+              val l = recLp ?: return
+              l.flags = if (on) {
+                  l.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
+              } else {
+                  l.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+              }
+              try { wm.updateViewLayout(v, l) } catch (_: Exception) {}
+          }
+
+          private fun replayLive(path: Path, duration: Long) {
+              setRecordingTouchable(false)
+              val d = duration.coerceIn(1L, GestureDescription.getMaxGestureDuration())
+              val gesture = GestureDescription.Builder()
+                  .addStroke(GestureDescription.StrokeDescription(path, 0, d))
+                  .build()
+              val ok = dispatchGesture(gesture, object : GestureResultCallback() {
+                  override fun onCompleted(g: GestureDescription?) { setRecordingTouchable(true) }
+                  override fun onCancelled(g: GestureDescription?) { setRecordingTouchable(true) }
+              }, null)
+              if (!ok) setRecordingTouchable(true)
+          }
+
+          private fun openConfig(i: Int) {
+              val cfg = Intent(this, ClickConfigActivity::class.java)
+              cfg.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+              cfg.putExtra("index", i)
+              try { startActivity(cfg) } catch (_: Exception) {}
+          }
+
+          fun getActInfo(i: Int): LongArray? {
+              val a = acts.getOrNull(i) ?: return null
+              return longArrayOf(a.customDelay, a.customDuration, if (a.swipe) 1L else 0L)
+          }
+
+          private fun fmtMs(ms: Long): String {
+              val h = ms / 3600000L
+              val m = (ms % 3600000L) / 60000L
+              val s = (ms % 60000L) / 1000L
+              val r = ms % 1000L
+              return "${h}h ${m}min ${s}s ${r}ms"
+          }
+
+          fun setActCustom(i: Int, delay: Long, duration: Long) {
+              val a = acts.getOrNull(i) ?: return
+              a.customDelay = delay
+              a.customDuration = duration
+              if (delay < 0) {
+                  toast("Botão " + (i + 1) + ": usando o padrão")
+              } else {
+                  toast("Botão " + (i + 1) + ": atraso " + fmtMs(delay))
+              }
+          }
+
+              private fun stopRecording() {
+                  if (!recording) return
+                  recording = false
+                  recBtn?.text = "⏺"
+                  recordingOverlay?.let { try { wm.removeView(it) } catch (_: Exception) {} }
+                  recordingOverlay = null
+                  recLp = null
+                  if (!running) disableShake()
+                  toast("Gravação salva! (${macroSteps.size} gestos gravados)")
+              }
+
+              private fun setMarkersRunning(on: Boolean) {
+                  for (a in acts) {
+                      for (v in listOfNotNull(a.a, a.b)) {
+                          val lp = lpOf(v)
+                          if (on) {
+                              lp.flags = lp.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+                              v.alpha = 0.25f
+                          } else {
+                              lp.flags = lp.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
+                              v.alpha = 0.92f
+                          }
+                          try { wm.updateViewLayout(v, lp) } catch (_: Exception) {}
+                      }
+                  }
+              }
+
+              private fun startRun() {
+                  if (recording) {
+                      toast("Pare a gravação primeiro")
+                      return
+                  }
+                  if (acts.isEmpty() && macroSteps.isEmpty()) {
+                      toast("Adicione pontos ou grave movimentos primeiro!")
+                      return
+                  }
+                  if (isBlocked(currentPkg)) {
+                      toast("🛡️ Modo seguro: bloqueado neste app")
+                      return
+                  }
+                  runGen++
+                  running = true
+                  idx = 0
+                  cycles = 0
+                  runStart = SystemClock.elapsedRealtime()
+                  enableShake()
+                  buzz(40)
+                  playBtn?.text = "⏸"
+                  setMarkersRunning(true)
+                  handler.postDelayed({ step() }, Prefs.get(this, "startDelay"))
+              }
+
+              private fun stopRun() {
+                  running = false
+                  runGen++
+                  handler.removeCallbacksAndMessages(null)
+                  playBtn?.text = "▶"
+                  setMarkersRunning(false)
+                  if (!recording) disableShake()
+              }
+
+              private fun step() {
+                  if (!running) return
+
+                  // Limite de tempo de segurança
+                  val maxMin = Prefs.get(this, "maxMinutes")
+                  if (maxMin > 0 && SystemClock.elapsedRealtime() - runStart > maxMin * 60_000L) {
+                      stopRun()
+                      toast("⏱ Tempo máximo de execução atingido")
+                      buzz(200)
+                      return
+                  }
+
+                  if (macroSteps.isNotEmpty()) {
+                      if (idx >= macroSteps.size) {
+                          idx = 0
+                          cycles++
+                          val maxRep = Prefs.get(this, "repeats")
+                          if (maxRep > 0 && cycles >= maxRep) {
+                              stopRun()
+                              toast("Macro concluída!")
+                              return
+                          }
+                      }
+                      val stepItem = macroSteps[idx]
+                      idx++
+                      val gen = runGen
+
+                      val gesture = GestureDescription.Builder()
+                          .addStroke(GestureDescription.StrokeDescription(stepItem.path, 0, stepItem.duration))
+                          .build()
+
+                      dispatchGesture(gesture, object : GestureResultCallback() {
+                          override fun onCompleted(g: GestureDescription?) { nextMacro(gen, stepItem.delayAfter) }
+                          override fun onCancelled(g: GestureDescription?) { nextMacro(gen, stepItem.delayAfter) }
+                      }, null)
+                      return
+                  }
+
+                  if (acts.isEmpty()) {
+                      stopRun()
+                      return
+                  }
+                  if (idx >= acts.size) {
+                      idx = 0
+                      cycles++
+                      val maxRep = Prefs.get(this, "repeats")
+                      if (maxRep > 0 && cycles >= maxRep) {
+                          stopRun()
+                          toast("Ciclo concluído!")
+                          return
+                      }
+                  }
+                  val act = acts[idx]
+                  idx++
+                  val gen = runGen
+
+                  val dm = resources.displayMetrics
+                  val maxX = (dm.widthPixels - 1).toFloat()
+                  val maxY = (dm.heightPixels - 1).toFloat()
+
+                  val c1 = centerOf(act.a)
+                  val path = Path()
+                  val jitVal = Prefs.get(this, "jitter").toInt()
+                  val jX = if (jitVal > 0) Random.nextInt(-jitVal, jitVal + 1) else 0
+                  val jY = if (jitVal > 0) Random.nextInt(-jitVal, jitVal + 1) else 0
+
+                  path.moveTo((c1.first + jX).coerceIn(0f, maxX), (c1.second + jY).coerceIn(0f, maxY))
+                  var dur = if (act.customDuration > 0) act.customDuration else if (act.swipe) Prefs.get(this, "swipeDur") else Prefs.get(this, "tapDur")
+
+                  val endMarker = act.b
+                  if (act.swipe && endMarker != null) {
+                      val c2 = centerOf(endMarker)
+                      path.lineTo((c2.first + jX).coerceIn(0f, maxX), (c2.second + jY).coerceIn(0f, maxY))
+                  }
+                  if (dur < 1) dur = 1
+
+                  val gesture = GestureDescription.Builder()
+                      .addStroke(GestureDescription.StrokeDescription(path, 0, dur))
+                      .build()
+
+                  dispatchGesture(gesture, object : GestureResultCallback() {
+                      override fun onCompleted(g: GestureDescription?) { nextPoint(gen, act.customDelay) }
+                      override fun onCancelled(g: GestureDescription?) { nextPoint(gen, act.customDelay) }
+                  }, null)
+              }
+
+          private fun nextPoint(gen: Int, custom: Long = -1L) {
+              if (gen == runGen && running) {
+                  var d: Long
+                  if (custom >= 0) {
+                      d = custom
+                  } else {
+                      d = Prefs.get(this, "interval")
+                      val rnd = Prefs.get(this, "random")
+                      if (rnd > 0) d += Random.nextLong(-rnd, rnd + 1)
+                  }
+                  if (d < 10) d = 10
+                  handler.postDelayed({ step() }, d)
+              }
+          }
+
+              private fun nextMacro(gen: Int, delay: Long) {
+                  if (gen == runGen && running) {
+                      handler.postDelayed({ step() }, delay.coerceAtLeast(10L))
+                  }
+              }
+
+              private fun centerOf(v: View): Pair<Float, Float> {
+                  val lp = lpOf(v)
+                  val half = markerSize() / 2
+                  return Pair((lp.x + half).toFloat(), (lp.y + half).toFloat())
+              }
+          }
+          KT_EOF
+
+      - name: Aceitar licencas do Android SDK
+        run: yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+      - name: Compilar APK Assinado (Release)
+        run: gradle assembleRelease --no-daemon --stacktrace
+      - name: Publicar APK Confiável
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          cp app/build/outputs/apk/release/app-release.apk AutoClickerPro-Trusted.apk
+          sha256sum AutoClickerPro-Trusted.apk > AutoClickerPro-Trusted.sha256
+          gh release create "v${{ github.run_number }}" AutoClickerPro-Trusted.apk AutoClickerPro-Trusted.sha256 \
+            --title "Auto Clicker Pro v${{ github.run_number }} [Signed & Trusted]" \
+            --notes "Versão assinada, otimizada com ProGuard, gravador de macros, shake-to-stop, limite de tempo, parada ao desligar a tela e bloqueio de apps sensíveis. Hash SHA-256 incluso para verificar a integridade."
