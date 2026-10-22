@@ -2110,6 +2110,6 @@ jobs:
         run: |
           cp app/build/outputs/apk/release/app-release.apk AutoClickerPro-Trusted.apk
           sha256sum AutoClickerPro-Trusted.apk > AutoClickerPro-Trusted.sha256
-          gh release create "v${{ github.run_number }}" AutoClickerPro-Trusted.apk AutoClickerPro-Trusted.sha256 \
+          gh release create "v2.2-${{ github.run_number }}" AutoClickerPro-Trusted.apk AutoClickerPro-Trusted.sha256 \
             --title "Auto Clicker Pro v${{ github.run_number }} [Signed & Trusted]" \
             --notes "Versão assinada, otimizada com ProGuard, gravador de macros, shake-to-stop, limite de tempo, parada ao desligar a tela e bloqueio de apps sensíveis. Hash SHA-256 incluso para verificar a integridade."
